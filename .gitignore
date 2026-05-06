@@ -1,0 +1,44 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# User data folders
+input/
+output/
+tests/
+fonts/
+
+# Temporary files and logs
+*.log
+*.tmp
+*.txt
+*.json
+diagnose_output.txt
+check_report.json
+final_check_report.json
+ocr_test_text.txt
+ocr_test_text_v2.txt
+ocr_test_words.json
+
+# Archives and installers
+*.zip
+*.exe
+tesseract-setup.exe
+dejavu-fonts.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
