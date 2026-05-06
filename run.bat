@@ -1,8 +1,6 @@
 @echo off
-title PDF Smeta to Excel Converter
-echo Starting conversion...
-echo --------------------------------------------------
-.\venv\Scripts\python.exe main.py --input input --output output
-echo --------------------------------------------------
-echo Process finished! Results are in the output folder.
+cd /d "%~dp0"
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0project\run.ps1" -Root "%ROOT%"
 pause

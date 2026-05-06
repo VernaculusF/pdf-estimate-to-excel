@@ -1,44 +1,30 @@
-# Virtual Environment
-venv/
-env/
-ENV/
+# Runtime data
+/input/
+/output/
+/вход(pdf)/
+/выход(excel)/
 
-# Python cache
+# Local virtual environments and caches
+/project/venv/
+/project/fonts/
+/project/__pycache__/
+/project/.pytest_cache/
+/project/.mypy_cache/
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 
-# User data folders
-input/
-output/
-tests/
-fonts/
-
-# Temporary files and logs
+# Test and report artifacts
 *.log
-*.tmp
-*.txt
-*.json
-diagnose_output.txt
-check_report.json
-final_check_report.json
-ocr_test_text.txt
-ocr_test_text_v2.txt
-ocr_test_words.json
+/project/.coverage
+/project/htmlcov/
+/output/*.json
+/output/*.xlsx
 
-# Archives and installers
-*.zip
-*.exe
-tesseract-setup.exe
-dejavu-fonts.zip
-
-# IDE
+# Local editor / OS files
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
