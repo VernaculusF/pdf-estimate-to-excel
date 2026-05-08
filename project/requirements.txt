@@ -1,0 +1,9 @@
+pdfplumber>=0.11.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+tqdm>=4.65.0
+pypdfium2>=4.30.0
+pytesseract>=0.3.13
+pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
