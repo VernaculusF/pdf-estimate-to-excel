@@ -21,6 +21,7 @@ if ((-not (Test-Path -LiteralPath $outputDir)) -and (Test-Path -LiteralPath $leg
     $outputDir = $legacyOutputDir
 }
 
+
 New-Item -ItemType Directory -Force -Path $inputDir | Out-Null
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 

@@ -17,7 +17,12 @@ from converter import SmetaConverter
 from document_export import DocumentExporter
 from extractor import SmetaExtractor
 from ocr_extractor import OCRExtractor
-from quality_report import build_reports_for_pairs, summarize_quality
+from quality_report import (
+    append_source_text_sheet,
+    build_reports_for_pairs,
+    extract_pdf_text,
+    summarize_quality,
+)
 
 
 logging.basicConfig(
@@ -59,11 +64,15 @@ class SmetaProcessor:
         logger.info("Processing file: %s", pdf_path_obj.name)
 
         is_scanned = force_ocr or self.ocr_extractor.is_scanned_pdf(str(pdf_path_obj))
+        raw_tables = []
         if is_scanned:
             logger.info("Detected scanned PDF, using OCR extraction")
             tables = self.ocr_extractor.extract_tables_from_pdf(str(pdf_path_obj))
         else:
             tables = self.extractor.extract_tables_from_pdf(str(pdf_path_obj))
+            raw_tables = self.extractor.extract_raw_tables_from_pdf(
+                str(pdf_path_obj), ocr_extractor=self.ocr_extractor
+            )
 
         if not tables:
             logger.warning("No tables detected in %s", pdf_path_obj.name)
@@ -82,8 +91,19 @@ class SmetaProcessor:
 
         df = self._align_columns(df.reset_index(drop=True))
 
-        result_path = self.converter.save_to_excel(df, str(output_path_obj))
+        if raw_tables:
+            raw_df = self.extractor.build_raw_estimate_dataframe(raw_tables)
+            result_path = self.converter.save_raw_estimate_to_excel(raw_df, str(output_path_obj))
+        else:
+            result_path = self.converter.save_to_excel(df, str(output_path_obj))
+
         self.document_exporter.append_header_sheet(result_path, str(pdf_path_obj))
+
+        pdf_text, source_method, _ = extract_pdf_text(str(pdf_path_obj))
+        if pdf_text:
+            append_source_text_sheet(result_path, pdf_text, source_method)
+            logger.info("Added Source Text sheet (method=%s)", source_method)
+
         logger.info("Saved workbook: %s", result_path)
         return result_path
 
@@ -101,7 +121,8 @@ class SmetaProcessor:
         output_path = Path(output_dir or DEFAULT_OUTPUT_DIR)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        pdf_files = list(input_path.glob("*.pdf"))
+        pdf_files = list(input_path.glob("*.pdf")) + list(input_path.glob("*.PDF"))
+        pdf_files = list({f: None for f in pdf_files}.keys())
         if not pdf_files:
             logger.warning("No PDF files found in %s", input_path)
             return []

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 from PIL import Image
@@ -63,7 +64,17 @@ class DocumentExportTests(unittest.TestCase):
 
         bottom = exporter._detect_header_bottom(fake_page, 2000)
 
-        self.assertEqual(bottom, 920)
+        self.assertEqual(bottom, 1400)
+
+    def test_detect_header_bottom_uses_horizontal_line_from_rendered_image(self):
+        exporter = DocumentExporter(ocr_extractor=None)
+        image = np.full((1000, 1000), 255, dtype=np.uint8)
+        image[620:623, 100:900] = 0
+        pil_image = Image.fromarray(image)
+
+        detected = exporter._detect_header_bottom_from_horizontal_lines(pil_image)
+
+        self.assertEqual(detected, 602)
 
 
 if __name__ == "__main__":

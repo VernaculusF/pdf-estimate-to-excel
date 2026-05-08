@@ -50,6 +50,197 @@ class SmetaExtractor:
         
         return all_structured_data
 
+    def extract_raw_tables_from_pdf(
+        self, pdf_path: str, ocr_extractor=None
+    ) -> List[List[List[Any]]]:
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF-file not found: {pdf_path}")
+
+        raw_tables: List[List[List[Any]]] = []
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_index, page in enumerate(pdf.pages):
+                words = page.extract_words()
+                is_scanned = len(words) == 0 and len(page.images) > 0
+
+                if is_scanned and ocr_extractor is not None:
+                    ocr_table = self._extract_raw_table_from_scanned_page(
+                        pdf_path, page_index, ocr_extractor
+                    )
+                    if ocr_table and len(ocr_table) >= MIN_TABLE_ROWS:
+                        raw_tables.append(ocr_table)
+                else:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if table and len(table) >= MIN_TABLE_ROWS:
+                            raw_tables.append(table)
+        return raw_tables
+
+    def _extract_raw_table_from_scanned_page(
+        self,
+        pdf_path: str,
+        page_index: int,
+        ocr_extractor,
+    ) -> Optional[List[List[str]]]:
+        import pypdfium2 as pdfium
+
+        try:
+            pdf_doc = pdfium.PdfDocument(pdf_path)
+            bitmap = pdf_doc[page_index].render(scale=ocr_extractor.dpi / 72)
+            pil_image = bitmap.to_pil()
+            pdf_doc.close()
+        except Exception:
+            return None
+
+        processed = ocr_extractor._preprocess_image(pil_image)
+
+        table_top = self._detect_table_top(processed)
+
+        if table_top and table_top > 20:
+            cropped = processed.crop((0, table_top, processed.width, processed.height))
+        else:
+            cropped = processed
+
+        try:
+            import pytesseract
+            ocr_data = pytesseract.image_to_data(
+                cropped,
+                lang=ocr_extractor.lang,
+                output_type=pytesseract.Output.DATAFRAME,
+                config=r'--oem 1 --psm 6',
+            )
+        except Exception:
+            return None
+
+        df_words = ocr_data[
+            (ocr_data['text'].notna())
+            & (ocr_data['text'].astype(str).str.strip() != '')
+            & (ocr_data['conf'] > 20)
+        ].copy()
+
+        if len(df_words) < 5:
+            return None
+
+        df_words['text'] = df_words['text'].astype(str)
+
+        col_lines = ocr_extractor._detect_table_lines(cropped)
+        if col_lines and len(col_lines) >= 3:
+            table_data = ocr_extractor._extract_with_column_lines(
+                df_words, col_lines, cropped.height
+            )
+        else:
+            df_words = ocr_extractor._group_words_into_lines(df_words)
+            table_data = ocr_extractor._group_lines_into_table(df_words)
+
+        if not table_data:
+            return None
+
+        table_data = self._filter_table_rows(table_data)
+
+        if not table_data:
+            return None
+
+        max_cols = max(len(row) for row in table_data)
+        normalized = [
+            row + [''] * (max_cols - len(row)) for row in table_data
+        ]
+        return normalized
+
+    def _detect_table_top(self, image) -> Optional[int]:
+        import cv2
+        import numpy as np
+
+        gray = np.array(image.convert("L") if hasattr(image, "convert") else image)
+        _, threshold = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(80, gray.shape[1] // 5), 1))
+        horizontal = cv2.morphologyEx(threshold, cv2.MORPH_OPEN, h_kernel)
+
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(40, gray.shape[0] // 15)))
+        vertical = cv2.morphologyEx(threshold, cv2.MORPH_OPEN, v_kernel)
+
+        combined = cv2.bitwise_or(horizontal, vertical)
+        row_sums = combined.sum(axis=1) / 255
+        width = gray.shape[1]
+        min_line_width = width * 0.25
+
+        for y in range(gray.shape[0]):
+            if row_sums[y] >= min_line_width:
+                return max(y - 5, 0)
+
+        return None
+
+    def _filter_table_rows(self, table_data: List[List[str]]) -> List[List[str]]:
+        filtered = []
+        found_header = False
+        col_number_re = re.compile(r'^\s*[\|\[\]]*\s*\d+\s*[\|\[\]]*\s*$')
+
+        for row in table_data:
+            non_empty = [c.strip() for c in row if c.strip()]
+            if not non_empty:
+                continue
+
+            joined = ' '.join(non_empty).lower()
+
+            if not found_header:
+                if 'наименование' in joined and ('ед' in joined or 'изм' in joined):
+                    found_header = True
+                    continue
+                continue
+
+            col_num_count = sum(
+                1 for c in row if c.strip() and col_number_re.match(c.strip())
+            )
+            if col_num_count >= 5:
+                continue
+
+            if re.match(r'^\s*страница\s+\d+\s*$', joined, re.IGNORECASE):
+                continue
+
+            all_empty_or_noise = all(
+                len(c.strip()) <= 1 or c.strip() in ('|', '[', ']', '‚', "'")
+                for c in row
+            )
+            if all_empty_or_noise:
+                continue
+
+            filtered.append(row)
+
+        return filtered
+
+    def build_raw_estimate_dataframe(self, raw_tables: List[List[List[Any]]]) -> pd.DataFrame:
+        max_cols = 0
+        cleaned_tables: List[List[List[str]]] = []
+
+        for table in raw_tables:
+            cleaned_table = [
+                [str(cell).replace("\n", " ").strip() if cell is not None else "" for cell in row]
+                for row in table
+                if any(cell is not None and str(cell).strip() != "" for cell in row)
+            ]
+            if not cleaned_table:
+                continue
+            table_max = max(len(row) for row in cleaned_table)
+            max_cols = max(max_cols, table_max)
+            cleaned_tables.append(cleaned_table)
+
+        if not cleaned_tables:
+            return pd.DataFrame()
+
+        normalized_rows: List[List[str]] = []
+        for cleaned_table in cleaned_tables:
+            table_max = max(len(row) for row in cleaned_table)
+            for row in cleaned_table:
+                row_len = len(row)
+                if row_len < max_cols:
+                    gap = max_cols - row_len
+                    aligned_row = [row[0]] + [""] * gap + row[1:]
+                else:
+                    aligned_row = row + [""] * (max_cols - row_len)
+                normalized_rows.append(aligned_row)
+
+        columns = [f"Column_{index + 1}" for index in range(max_cols)]
+        return pd.DataFrame(normalized_rows, columns=columns)
+
     def _process_table_to_structure(self, raw_table: List[List[Any]]) -> pd.DataFrame:
         """
         Превращает «сырую» таблицу из PDF в строго структурированный DataFrame.

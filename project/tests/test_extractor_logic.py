@@ -149,7 +149,7 @@ class ExtractorLogicTests(unittest.TestCase):
 
 
 class ProcessorMergeTests(unittest.TestCase):
-    def test_process_single_file_merges_tables_when_enabled(self):
+    def test_process_single_file_prefers_raw_estimate_export_when_raw_tables_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             pdf_path = Path(tmp) / "sample.pdf"
             pdf_path.write_bytes(b"%PDF-1.4\n%stub")
@@ -166,16 +166,20 @@ class ProcessorMergeTests(unittest.TestCase):
 
             processor.ocr_extractor.is_scanned_pdf.return_value = False
             processor.extractor.extract_tables_from_pdf.return_value = [table_a, table_b]
+            processor.extractor.extract_raw_tables_from_pdf.return_value = [[["1", "code", "name"]]]
+            processor.extractor.build_raw_estimate_dataframe.return_value = pd.DataFrame(
+                [["1", "code", "name"]],
+                columns=["Column_1", "Column_2", "Column_3"],
+            )
             processor.extractor.merge_tables.return_value = merged
-            processor.converter.save_to_excel.return_value = str(output_path)
+            processor.converter.save_raw_estimate_to_excel.return_value = str(output_path)
             processor.document_exporter = Mock()
 
             processor.process_single_file(str(pdf_path), str(output_path), merge_tables=True)
 
             processor.extractor.merge_tables.assert_called_once()
             processor.document_exporter.append_header_sheet.assert_called_once()
-            saved_df = processor.converter.save_to_excel.call_args.args[0]
-            self.assertEqual(len(saved_df), 2)
+            processor.converter.save_raw_estimate_to_excel.assert_called_once()
 
 
 if __name__ == "__main__":

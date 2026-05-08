@@ -22,6 +22,14 @@ from config import (
 
 
 _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
+_ILLEGAL_XML_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff\ufffe\uffff]"
+)
+
+
+def _sanitize_for_excel(text: str) -> str:
+    """Remove characters that openpyxl / XML cannot represent."""
+    return _ILLEGAL_XML_RE.sub("", text) if text else text
 
 
 def normalize_visible_text(text: str) -> str:
@@ -84,10 +92,11 @@ def append_source_text_sheet(excel_path: str, source_text: str, source_method: s
     bold_font.bold = True
     worksheet["A2"].font = bold_font
 
+    safe_text = _sanitize_for_excel(source_text)
     max_cell_chars = 32767
     chunks = [
-        source_text[index:index + max_cell_chars]
-        for index in range(0, len(source_text), max_cell_chars)
+        safe_text[index:index + max_cell_chars]
+        for index in range(0, len(safe_text), max_cell_chars)
     ]
     for row_index, chunk in enumerate(chunks, start=3):
         worksheet.cell(row=row_index, column=1, value=chunk)
@@ -223,15 +232,19 @@ def summarize_quality(records: Iterable[Dict[str, object]]) -> str:
 
 
 def _extract_pdf_text_pages_with_ocr(pdf_path: str) -> List[str]:
+    import shutil
+
     try:
         import pypdfium2 as pdfium
         import pytesseract
     except Exception:
         return []
 
-    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(tesseract_path):
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    _path = shutil.which("tesseract")
+    if _path:
+        pytesseract.pytesseract.tesseract_cmd = _path
+    elif os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
     chunks: List[str] = []
     try:
@@ -239,7 +252,9 @@ def _extract_pdf_text_pages_with_ocr(pdf_path: str) -> List[str]:
         for page in pdf_doc:
             bitmap = page.render(scale=300 / 72)
             image = bitmap.to_pil()
-            chunks.append(pytesseract.image_to_string(image, lang="rus+eng"))
+            text = pytesseract.image_to_string(image, lang="rus")
+            chunks.append(text)
+        pdf_doc.close()
     except Exception:
         return []
 

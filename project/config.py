@@ -18,6 +18,23 @@ SOURCE_TEXT_SHEET_NAME = "Source Text"
 SOURCE_TEXT_SOURCE_LABEL = "Source"
 SOURCE_TEXT_CONTENT_LABEL = "PDF Text"
 
+RAW_ESTIMATE_COLUMNS = [
+    "№\nпп",
+    "Обоснование",
+    "Наименование",
+    "Ед. изм.",
+    "Кол.\nна ед.",
+    "Кол.\nвсего",
+    "Сметная стоимость\nна ед.",
+    "Сметная стоимость\nобщая",
+    "Осн.З/п",
+    "Эк.Маш.",
+    "З/пМех",
+    "Мат",
+    "Т/з осн.\nраб.",
+    "Т/з мех.",
+]
+
 SMETA_COLUMNS = [
     "№ п/п",
     "Код",

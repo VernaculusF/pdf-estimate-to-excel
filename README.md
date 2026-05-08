@@ -61,19 +61,19 @@ Those reports summarize visible-character preservation for the generated output.
 From `project/`:
 
 ```powershell
-venv\Scripts\python.exe main.py --input ..\input --output ..\output
+venv\Scripts\python.exe main.py --input "..\\input" --output "..\\output"
 ```
 
 Process a single file:
 
 ```powershell
-venv\Scripts\python.exe main.py --file ..\input\example.pdf --output ..\output
+venv\Scripts\python.exe main.py --file "..\\input\example.pdf" --output "..\\output"
 ```
 
 Force OCR for all files:
 
 ```powershell
-venv\Scripts\python.exe main.py --input ..\input --output ..\output --use-ocr
+venv\Scripts\python.exe main.py --input "..\\input" --output "..\\output" --use-ocr
 ```
 
 ## Requirements
