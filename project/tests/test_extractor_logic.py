@@ -173,8 +173,7 @@ class ProcessorMergeTests(unittest.TestCase):
             processor.process_single_file(str(pdf_path), str(output_path), merge_tables=True)
 
             processor.extractor.merge_tables.assert_called_once()
-            processor.document_exporter.build_pages.assert_called_once()
-            processor.document_exporter.append_page_sheets.assert_called_once()
+            processor.document_exporter.append_header_sheet.assert_called_once()
             saved_df = processor.converter.save_to_excel.call_args.args[0]
             self.assertEqual(len(saved_df), 2)
 

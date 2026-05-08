@@ -1,9 +1,10 @@
 # PDF Estimate to Excel
 
-Convert estimate PDFs into Excel workbooks with two parallel outputs:
+Convert estimate PDFs into Excel workbooks with three practical outputs:
 
 - a structured `Estimate` sheet for the tabular data;
-- page-by-page sheets plus a `Source Text` sheet so the full document text is still preserved as far as the parser/OCR can recover it.
+- a `Header` sheet that keeps the document header as an embedded image;
+- a `Source Text` sheet so the full document text is still preserved as far as the parser/OCR can recover it.
 
 The project is built for Russian estimate PDFs, including mixed inputs where some pages have a text layer and some pages are scans.
 
@@ -36,8 +37,8 @@ They are intentionally ignored by Git.
 
 For each source PDF the converter writes one `.xlsx` workbook with:
 
+- `Header` — image-based header export from the first PDF page.
 - `Estimate` — best-effort structured extraction of estimate rows and values.
-- `Page_01`, `Page_02`, ... — page-level export for the full document.
 - `Source Text` — full extracted text from the PDF text layer or OCR fallback.
 
 It also writes:
@@ -102,7 +103,7 @@ This tool is reliable for extracting tabular content and for preserving recovere
 In practice:
 
 - table pages convert reasonably well into structured Excel rows;
-- title pages, stamps, signatures, and complex visual layouts do not map cleanly into native Excel cells;
+- title/header pages, stamps, signatures, and complex visual layouts do not map cleanly into native Excel cells, so the header is exported as an image sheet instead;
 - scanned pages depend heavily on OCR quality.
 
-That is why the workbook contains both a structured sheet and page-level / source-text fallbacks instead of pretending every page can be reconstructed as a clean Excel grid.
+That is why the workbook contains a structured sheet plus visual/text fallbacks instead of pretending the full PDF can be rebuilt as a clean native Excel layout.

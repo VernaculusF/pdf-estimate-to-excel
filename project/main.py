@@ -83,10 +83,7 @@ class SmetaProcessor:
         df = self._align_columns(df.reset_index(drop=True))
 
         result_path = self.converter.save_to_excel(df, str(output_path_obj))
-        self.document_exporter.append_page_sheets(
-            result_path,
-            self.document_exporter.build_pages(str(pdf_path_obj)),
-        )
+        self.document_exporter.append_header_sheet(result_path, str(pdf_path_obj))
         logger.info("Saved workbook: %s", result_path)
         return result_path
 
