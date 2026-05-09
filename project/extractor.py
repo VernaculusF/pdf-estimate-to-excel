@@ -4,15 +4,20 @@
 
 import os
 import re
+import tempfile
 from typing import List, Optional, Dict, Any, Tuple
 
 import pdfplumber
 import pandas as pd
+import pypdfium2 as pdfium
+import pytesseract
+from PIL import Image
 
 from config import (
     MIN_TABLE_ROWS, MIN_TABLE_COLS, 
     SMETA_COLUMNS, KEYWORDS_RESOURCES, KEYWORDS_TOTALS
 )
+from ocr_extractor import OCRExtractor
 
 
 class SmetaExtractor:
@@ -40,8 +45,12 @@ class SmetaExtractor:
         
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                # Извлекаем все таблицы со страницы
-                tables = page.extract_tables()
+                # Prefer find_tables which handles spanning cells better
+                try:
+                    found_tables = page.find_tables()
+                    tables = [t.extract() for t in found_tables]
+                except Exception:
+                    tables = page.extract_tables()
                 for table in tables:
                     if table and len(table) >= MIN_TABLE_ROWS:
                         df = self._process_table_to_structure(table)
@@ -56,7 +65,8 @@ class SmetaExtractor:
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF-file not found: {pdf_path}")
 
-        raw_tables: List[List[List[Any]]] = []
+        all_tables: List[tuple] = []
+
         with pdfplumber.open(pdf_path) as pdf:
             for page_index, page in enumerate(pdf.pages):
                 words = page.extract_words()
@@ -67,13 +77,35 @@ class SmetaExtractor:
                         pdf_path, page_index, ocr_extractor
                     )
                     if ocr_table and len(ocr_table) >= MIN_TABLE_ROWS:
-                        raw_tables.append(ocr_table)
+                        all_tables.append((page_index, 'ocr', ocr_table))
                 else:
                     tables = page.extract_tables()
                     for table in tables:
                         if table and len(table) >= MIN_TABLE_ROWS:
-                            raw_tables.append(table)
-        return raw_tables
+                            all_tables.append((page_index, 'plumber', table))
+
+        plumber_tables = [t for _, src, t in all_tables if src == 'plumber']
+        if plumber_tables:
+            canonical_cols = self._canonical_col_count(plumber_tables)
+            result: List[List[List[Any]]] = []
+            for _, src, table in all_tables:
+                if src == 'plumber':
+                    result.append(table)
+                else:
+                    ot_cols = len(table[0]) if table else 0
+                    if abs(ot_cols - canonical_cols) <= 2:
+                        result.append(table)
+            return result
+
+        return [t for _, _, t in all_tables]
+
+    @staticmethod
+    def _canonical_col_count(tables: List[List[List[Any]]]) -> int:
+        from collections import Counter
+        counts = Counter(
+            len(t[0]) for t in tables if t
+        )
+        return counts.most_common(1)[0][0] if counts else 0
 
     def _extract_raw_table_from_scanned_page(
         self,
@@ -81,13 +113,10 @@ class SmetaExtractor:
         page_index: int,
         ocr_extractor,
     ) -> Optional[List[List[str]]]:
-        import pypdfium2 as pdfium
-
         try:
-            pdf_doc = pdfium.PdfDocument(pdf_path)
-            bitmap = pdf_doc[page_index].render(scale=ocr_extractor.dpi / 72)
-            pil_image = bitmap.to_pil()
-            pdf_doc.close()
+            pil_image = ocr_extractor.render_pdf_page(
+                pdf_path, page_index, ocr_extractor.dpi
+            )
         except Exception:
             return None
 
@@ -95,7 +124,8 @@ class SmetaExtractor:
 
         table_top = self._detect_table_top(processed)
 
-        if table_top and table_top > 20:
+        # Only crop if there is a lot of whitespace/noise above the table
+        if table_top and table_top > 80:
             cropped = processed.crop((0, table_top, processed.width, processed.height))
         else:
             cropped = processed
@@ -122,11 +152,47 @@ class SmetaExtractor:
 
         df_words['text'] = df_words['text'].astype(str)
 
-        col_lines = ocr_extractor._detect_table_lines(cropped)
+        # Fallback keyword-based table top detection when line detection failed
+        if table_top is None:
+            keyword_top = ocr_extractor._find_table_top_by_keywords(df_words)
+            if keyword_top is not None and keyword_top > 80:
+                table_top = keyword_top
+                cropped = processed.crop((0, table_top, processed.width, processed.height))
+                try:
+                    ocr_data = pytesseract.image_to_data(
+                        cropped,
+                        lang=ocr_extractor.lang,
+                        output_type=pytesseract.Output.DATAFRAME,
+                        config=r'--oem 1 --psm 6',
+                    )
+                    df_words = ocr_data[
+                        (ocr_data['text'].notna())
+                        & (ocr_data['text'].astype(str).str.strip() != '')
+                        & (ocr_data['conf'] > 20)
+                    ].copy()
+                    df_words['text'] = df_words['text'].astype(str)
+                except Exception:
+                    pass
+
+        line_detect_src = pil_image
+        if table_top and table_top > 80:
+            line_detect_src = pil_image.crop(
+                (0, table_top, pil_image.width, pil_image.height)
+            )
+        col_lines = ocr_extractor._detect_table_lines(line_detect_src)
+        h_lines = ocr_extractor._detect_horizontal_lines(line_detect_src)
         if col_lines and len(col_lines) >= 3:
             table_data = ocr_extractor._extract_with_column_lines(
-                df_words, col_lines, cropped.height
+                df_words, col_lines, cropped.height, h_lines=h_lines,
             )
+            # Validate: if too many empty/garbage rows fall back to gap-based grouping
+            filled_rows = [
+                r for r in table_data
+                if sum(1 for c in r if str(c).strip()) >= 2
+            ]
+            if len(filled_rows) < max(3, len(table_data) * 0.3):
+                df_words = ocr_extractor._group_words_into_lines(df_words)
+                table_data = ocr_extractor._group_lines_into_table(df_words)
         else:
             df_words = ocr_extractor._group_words_into_lines(df_words)
             table_data = ocr_extractor._group_lines_into_table(df_words)
@@ -163,16 +229,41 @@ class SmetaExtractor:
         width = gray.shape[1]
         min_line_width = width * 0.25
 
-        for y in range(gray.shape[0]):
+        # Skip the top 15% of the page to avoid document-header lines
+        skip_top = int(gray.shape[0] * 0.08)
+        first_line_y = None
+        for y in range(skip_top, gray.shape[0]):
             if row_sums[y] >= min_line_width:
-                return max(y - 5, 0)
+                first_line_y = y
+                break
 
+        if first_line_y is None:
+            return None
+
+        # Find the topmost horizontal line (table top border)
+        # We only crop if the line is far enough from top (there is significant header noise)
+        # and if there is enough whitespace between top and the line
+        if first_line_y > 80:
+            # Check there are no strong horizontal lines in upper half
+            upper_region = row_sums[:first_line_y]
+            strong_lines_in_upper = sum(1 for val in upper_region if val >= min_line_width * 0.5)
+            if strong_lines_in_upper <= 1:
+                return max(first_line_y - 5, 0)
+
+        # If table starts near top, don't crop
         return None
 
     def _filter_table_rows(self, table_data: List[List[str]]) -> List[List[str]]:
         filtered = []
         found_header = False
-        col_number_re = re.compile(r'^\s*[\|\[\]]*\s*\d+\s*[\|\[\]]*\s*$')
+        col_number_re = re.compile(r'^\s*[\|\[\]{}]*\s*\d+\s*[\|\[\]{}]*\s*$')
+        header_keywords = {
+            "наименование", "стоимость", "работ", "затрат", "обоснование", "код",
+            "ед", "изм", "кол", "п/п", "сумма", "цена", "индекс", "контракт",
+            "инфляц", "период", "выполнен", "примечани", "макс", "начал",
+            "номер", "позиция", "шифр", "ресурс", "труд", "материал", "цены",
+        }
+        noise_chars = {'|', '[', ']', '{', '}', '\u201a', "'", '-', '_', '°', ' ', ''}
 
         for row in table_data:
             non_empty = [c.strip() for c in row if c.strip()]
@@ -180,24 +271,47 @@ class SmetaExtractor:
                 continue
 
             joined = ' '.join(non_empty).lower()
+            joined_no_space = joined.replace(' ', '')
+
+            # Detect header row
+            is_header = False
+            if len(non_empty) >= 2:
+                is_header = any(kw in joined_no_space for kw in header_keywords)
 
             if not found_header:
-                if 'наименование' in joined and ('ед' in joined or 'изм' in joined):
+                if is_header:
                     found_header = True
-                    continue
+                    # Keep the header row so _detect_header_rows in
+                    # build_raw_estimate_dataframe can use it
+                    filtered.append(row)
                 continue
+
+            # Do NOT drop data rows that merely contain a keyword inside a value.
+            # Only skip a row after the header if it looks like a *repeated* header
+            # (most non-empty cells are short keyword fragments).
+            if is_header:
+                keyword_cell_count = sum(
+                    1 for c in non_empty
+                    if any(kw in c.lower().replace(' ', '') for kw in header_keywords)
+                )
+                if keyword_cell_count >= max(2, len(non_empty) * 0.6):
+                    continue
 
             col_num_count = sum(
                 1 for c in row if c.strip() and col_number_re.match(c.strip())
             )
-            if col_num_count >= 5:
+            if col_num_count >= max(3, len(non_empty) // 2):
                 continue
 
             if re.match(r'^\s*страница\s+\d+\s*$', joined, re.IGNORECASE):
                 continue
 
+            # Drop rows with generic Column_N placeholders
+            if any(re.match(r'^Column_\d+$', c.strip(), re.IGNORECASE) for c in row):
+                continue
+
             all_empty_or_noise = all(
-                len(c.strip()) <= 1 or c.strip() in ('|', '[', ']', '‚', "'")
+                len(c.strip()) <= 1 or set(c.strip()).issubset(noise_chars)
                 for c in row
             )
             if all_empty_or_noise:
@@ -208,38 +322,189 @@ class SmetaExtractor:
         return filtered
 
     def build_raw_estimate_dataframe(self, raw_tables: List[List[List[Any]]]) -> pd.DataFrame:
-        max_cols = 0
-        cleaned_tables: List[List[List[str]]] = []
-
-        for table in raw_tables:
-            cleaned_table = [
-                [str(cell).replace("\n", " ").strip() if cell is not None else "" for cell in row]
-                for row in table
-                if any(cell is not None and str(cell).strip() != "" for cell in row)
-            ]
-            if not cleaned_table:
-                continue
-            table_max = max(len(row) for row in cleaned_table)
-            max_cols = max(max_cols, table_max)
-            cleaned_tables.append(cleaned_table)
-
-        if not cleaned_tables:
+        target_cols = self._canonical_col_count(raw_tables)
+        if target_cols == 0:
+            target_cols = max(
+                (len(row) for t in raw_tables for row in t),
+                default=0,
+            )
+        if target_cols == 0:
             return pd.DataFrame()
 
         normalized_rows: List[List[str]] = []
-        for cleaned_table in cleaned_tables:
-            table_max = max(len(row) for row in cleaned_table)
-            for row in cleaned_table:
-                row_len = len(row)
-                if row_len < max_cols:
-                    gap = max_cols - row_len
-                    aligned_row = [row[0]] + [""] * gap + row[1:]
-                else:
-                    aligned_row = row + [""] * (max_cols - row_len)
-                normalized_rows.append(aligned_row)
+        for table in raw_tables:
+            for row in table:
+                if not any(
+                    cell is not None and str(cell).strip() != ""
+                    for cell in row
+                ):
+                    continue
+                clean = [
+                    OCRExtractor._clean_ocr_cell(
+                        str(cell).replace("\n", " ").strip()
+                    )
+                    if cell is not None
+                    else ""
+                    for cell in row
+                ]
+                if len(clean) < target_cols:
+                    gap = target_cols - len(clean)
+                    if gap >= 3 and len(clean) >= 2:
+                        clean = [clean[0]] + [""] * gap + clean[1:]
+                    else:
+                        clean += [""] * gap
+                elif len(clean) > target_cols:
+                    clean = clean[:target_cols]
+                normalized_rows.append(clean)
 
-        columns = [f"Column_{index + 1}" for index in range(max_cols)]
-        return pd.DataFrame(normalized_rows, columns=columns)
+        if not normalized_rows:
+            return pd.DataFrame()
+
+        # Try to detect real headers from the first rows
+        header_rows, data_rows = self._detect_header_rows(normalized_rows, target_cols)
+        if header_rows:
+            columns = self._merge_header_rows(header_rows, target_cols)
+        else:
+            columns = [f"Column_{i + 1}" for i in range(target_cols)]
+
+        # Filter garbage / phantom rows
+        data_rows = [row for row in data_rows if not self._is_garbage_row(row)]
+
+        if not data_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data_rows, columns=columns)
+        df = df.replace(r'^\s*$', None, regex=True)
+        df = df.dropna(how='all').reset_index(drop=True)
+        return df
+
+    @staticmethod
+    def _detect_header_rows(rows: List[List[Any]], num_cols: int) -> Tuple[List[List[str]], List[List[str]]]:
+        if not rows:
+            return [], []
+
+        header_keywords = {
+            "наименование", "стоимость", "работ", "затрат", "обоснование", "код",
+            "ед", "изм", "кол", "п/п", "сумма", "цена", "индекс", "контракт",
+            "инфляц", "период", "выполнен", "примечани", "макс", "начал",
+            "номер", "позиция", "шифр", "ресурс", "труд", "материал", "цены",
+        }
+
+        max_header_scan = min(5, len(rows))
+        header_row_indices = []
+
+        for i, row in enumerate(rows[:max_header_scan]):
+            str_row = [str(c).strip() if c is not None else "" for c in row]
+            non_empty = [c for c in str_row if c]
+            if len(non_empty) < 2:
+                continue
+
+            joined = " ".join(non_empty).lower()
+            joined_no_space = joined.replace(" ", "")
+
+            has_keyword = any(kw in joined_no_space for kw in header_keywords)
+            if not has_keyword:
+                continue
+
+            # Reject if any of the first two cells looks like a position number
+            # (digits like "1.", "12 ", or a single letter like "В")
+            position_re = re.compile(r"^\s*[\dА-ЯA-Z][\d\s.)\-/\\]*\s*$")
+            if any(position_re.match(c) for c in str_row[:2] if c):
+                continue
+
+            # Reject totals
+            if any(kw in joined_no_space for kw in {"итого", "всего", "всего:", "итого:"}):
+                continue
+
+            # Reject rows that contain large monetary / numeric values
+            # (headers rarely have 5+ digit numbers in data columns)
+            has_large_number = any(
+                len(re.sub(r"[^\d]", "", c)) >= 5
+                for c in str_row[2:] if c
+            )
+            if has_large_number:
+                continue
+
+            header_row_indices.append(i)
+
+        # Only accept consecutive header rows starting from index 0
+        if header_row_indices and header_row_indices[0] == 0:
+            consecutive = [0]
+            for idx in header_row_indices[1:]:
+                if idx == consecutive[-1] + 1:
+                    consecutive.append(idx)
+                else:
+                    break
+            header = [rows[i] for i in consecutive]
+            data = rows[len(consecutive):]
+            return header, data
+
+        return [], rows
+
+    @staticmethod
+    def _merge_header_rows(header_rows: List[List[Any]], num_cols: int) -> List[str]:
+        columns = [""] * num_cols
+        for row in header_rows:
+            for i, cell in enumerate(row[:num_cols]):
+                cell = str(cell).strip() if cell is not None else ""
+                if not cell:
+                    continue
+                if cell in columns[i]:
+                    continue
+                if columns[i]:
+                    columns[i] += " " + cell
+                else:
+                    columns[i] = cell
+        for i in range(num_cols):
+            if not columns[i]:
+                columns[i] = f"Column_{i + 1}"
+        return columns
+
+    @staticmethod
+    def _is_garbage_row(row: List[Any]) -> bool:
+        str_row = [str(c).strip() if c is not None else "" for c in row]
+        non_empty = [c for c in str_row if c]
+        if not non_empty:
+            return True
+
+        joined = " ".join(non_empty).lower()
+        joined_no_space = joined.replace(" ", "")
+
+        # Page numbers
+        if re.match(r"^\s*страница\s+\d+\s*$", joined, re.IGNORECASE):
+            return True
+
+        # Generic column placeholders only
+        if all(re.match(r"^Column_\d+$", c, re.IGNORECASE) for c in non_empty):
+            return True
+
+        # Only noise characters (allow single long cell if it contains real text)
+        noise_chars = {"|", "[", "]", "{", "}", "\u201a", "'", "-", "_", "°", " ", ""}
+        all_noise = all(
+            len(c) <= 1 or set(c).issubset(noise_chars)
+            for c in str_row
+        )
+        if all_noise:
+            return True
+
+        # A single cell that is just a short number (like "1", "2", "3") with no other text
+        if len(non_empty) == 1:
+            only = non_empty[0]
+            if re.match(r"^\d+[.)]?$", only):
+                return True
+
+        # Rows that look like scattered random short tokens without any Russian word
+        if len(non_empty) <= 2:
+            has_russian = any(
+                bool(re.search(r"[а-яёА-ЯЁ]", c)) for c in non_empty
+            )
+            has_meaningful_number = any(
+                re.search(r"\d{3,}", c) for c in non_empty
+            )
+            if not has_russian and not has_meaningful_number:
+                return True
+
+        return False
 
     def _process_table_to_structure(self, raw_table: List[List[Any]]) -> pd.DataFrame:
         """

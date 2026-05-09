@@ -5,11 +5,14 @@ Convert estimate PDFs into Excel workbooks.
 
 import argparse
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
+import pypdfium2 as pdfium
 from tqdm import tqdm
 
 from config import DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, SMETA_COLUMNS
@@ -63,19 +66,38 @@ class SmetaProcessor:
 
         logger.info("Processing file: %s", pdf_path_obj.name)
 
-        is_scanned = force_ocr or self.ocr_extractor.is_scanned_pdf(str(pdf_path_obj))
+        oriented_tmp = self.ocr_extractor.normalize_pdf_orientation(str(pdf_path_obj))
+        working_pdf = oriented_tmp if oriented_tmp else str(pdf_path_obj)
+
+        try:
+            return self._do_process(working_pdf, str(pdf_path_obj), str(output_path_obj), merge_tables, force_ocr)
+        finally:
+            if oriented_tmp and os.path.exists(oriented_tmp):
+                os.remove(oriented_tmp)
+
+    def _do_process(
+        self,
+        working_pdf: str,
+        original_pdf: str,
+        output_path: str,
+        merge_tables: bool,
+        force_ocr: bool,
+    ) -> str:
+        output_path_obj = Path(output_path)
+
+        is_scanned = force_ocr or self.ocr_extractor.is_scanned_pdf(working_pdf)
         raw_tables = []
         if is_scanned:
             logger.info("Detected scanned PDF, using OCR extraction")
-            tables = self.ocr_extractor.extract_tables_from_pdf(str(pdf_path_obj))
+            tables = self.ocr_extractor.extract_tables_from_pdf(working_pdf)
         else:
-            tables = self.extractor.extract_tables_from_pdf(str(pdf_path_obj))
+            tables = self.extractor.extract_tables_from_pdf(working_pdf)
             raw_tables = self.extractor.extract_raw_tables_from_pdf(
-                str(pdf_path_obj), ocr_extractor=self.ocr_extractor
+                working_pdf, ocr_extractor=self.ocr_extractor
             )
 
         if not tables:
-            logger.warning("No tables detected in %s", pdf_path_obj.name)
+            logger.warning("No tables detected in %s", Path(original_pdf).name)
             empty_df = pd.DataFrame({"Message": ["No tables were detected in the PDF file."]})
             self.converter.save_to_excel(empty_df, str(output_path_obj))
             return str(output_path_obj)
@@ -90,16 +112,18 @@ class SmetaProcessor:
             logger.info("Using a single table with %s row(s)", len(df))
 
         df = self._align_columns(df.reset_index(drop=True))
+        df = df.dropna(how="all").reset_index(drop=True)
 
         if raw_tables:
             raw_df = self.extractor.build_raw_estimate_dataframe(raw_tables)
+            raw_df = raw_df.dropna(how="all").reset_index(drop=True)
             result_path = self.converter.save_raw_estimate_to_excel(raw_df, str(output_path_obj))
         else:
             result_path = self.converter.save_to_excel(df, str(output_path_obj))
 
-        self.document_exporter.append_header_sheet(result_path, str(pdf_path_obj))
+        self.document_exporter.append_header_sheet(result_path, working_pdf)
 
-        pdf_text, source_method, _ = extract_pdf_text(str(pdf_path_obj))
+        pdf_text, source_method, _ = extract_pdf_text(working_pdf)
         if pdf_text:
             append_source_text_sheet(result_path, pdf_text, source_method)
             logger.info("Added Source Text sheet (method=%s)", source_method)
@@ -162,6 +186,20 @@ class SmetaProcessor:
                 aligned_df[column] = df[column]
 
         if aligned_df.dropna(how="all").empty and not df.dropna(how="all").empty:
+            current_cols = list(df.columns)
+            has_generic = any(str(c).startswith("Column_") for c in current_cols)
+            # If columns already look like real headers, keep them
+            if not has_generic:
+                return df
+            # Try to detect headers from first data rows when columns are generic
+            from extractor import SmetaExtractor
+            rows = df.head(10).astype(str).values.tolist()
+            num_cols = len(rows[0]) if rows else 0
+            header_rows, data_rows = SmetaExtractor._detect_header_rows(rows, num_cols)
+            if header_rows:
+                new_cols = SmetaExtractor._merge_header_rows(header_rows, num_cols)
+                df = pd.DataFrame(data_rows + rows[len(header_rows):], columns=new_cols)
+                return df
             df.columns = [f"Column_{index + 1}" for index in range(len(df.columns))]
             return df
 

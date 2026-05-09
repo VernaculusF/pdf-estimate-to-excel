@@ -235,8 +235,8 @@ def _extract_pdf_text_pages_with_ocr(pdf_path: str) -> List[str]:
     import shutil
 
     try:
-        import pypdfium2 as pdfium
         import pytesseract
+        from ocr_extractor import OCRExtractor
     except Exception:
         return []
 
@@ -248,13 +248,11 @@ def _extract_pdf_text_pages_with_ocr(pdf_path: str) -> List[str]:
 
     chunks: List[str] = []
     try:
-        pdf_doc = pdfium.PdfDocument(pdf_path)
-        for page in pdf_doc:
-            bitmap = page.render(scale=300 / 72)
-            image = bitmap.to_pil()
+        page_count = OCRExtractor.get_pdf_page_count(pdf_path)
+        for page_index in range(page_count):
+            image = OCRExtractor.render_pdf_page(pdf_path, page_index, 300)
             text = pytesseract.image_to_string(image, lang="rus")
             chunks.append(text)
-        pdf_doc.close()
     except Exception:
         return []
 

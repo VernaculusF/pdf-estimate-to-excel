@@ -4,11 +4,11 @@ from typing import Optional
 import cv2
 import numpy as np
 import pdfplumber
-import pypdfium2 as pdfium
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 
 from config import HEADER_SHEET_NAME
+from ocr_extractor import OCRExtractor
 
 
 class DocumentExporter:
@@ -43,12 +43,9 @@ class DocumentExporter:
                 return None
 
             first_page = pdf.pages[0]
-            render_scale = self.header_render_dpi / 72
-            pdf_doc = pdfium.PdfDocument(pdf_path)
-            try:
-                image = pdf_doc[0].render(scale=render_scale).to_pil()
-            finally:
-                pdf_doc.close()
+            image = OCRExtractor.render_pdf_page(
+                pdf_path, 0, self.header_render_dpi
+            )
 
             bottom = self._detect_header_bottom(first_page, image.height, image)
             bottom = max(200, min(bottom, image.height))

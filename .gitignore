@@ -28,3 +28,9 @@ __pycache__/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Kilo local config
+.kilo/
+
+# Tesseract trained data (large binaries)
+/project/tessdata_new/
