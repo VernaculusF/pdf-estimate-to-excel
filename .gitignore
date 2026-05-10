@@ -34,3 +34,6 @@ Thumbs.db
 
 # Tesseract trained data (large binaries)
 /project/tessdata_new/
+
+# Test logs
+full_test_log.txt
